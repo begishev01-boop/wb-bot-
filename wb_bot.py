@@ -634,4 +634,109 @@ async def payment(message: types.Message):
 
 ✅ После оплаты нажмите «Я оплатил»
 """
-    kb = In
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="payment_done")],
+        [InlineKeyboardButton(text="❓ Помощь", callback_data="payment_help")]
+    ])
+    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data == "payment_done")
+async def payment_done(callback: types.CallbackQuery):
+    await callback.message.edit_text("🔍 Запрос отправлен администратору. Ожидайте подтверждения...")
+    await bot.send_message(ADMIN_ID, f"💰 ОПЛАТА\nПользователь: @{callback.from_user.username}\nID: {callback.from_user.id}\nСумма: {PRICE} ₽\n/activate_{callback.from_user.id} — активировать")
+    await callback.answer()
+
+@dp.callback_query_handler(lambda c: c.data == "payment_help")
+async def payment_help(callback: types.CallbackQuery):
+    await callback.message.edit_text("❓ Если оплата не проходит, напишите администратору @support")
+    await callback.answer()
+
+@dp.message_handler(lambda msg: str(msg.from_user.id) == str(ADMIN_ID) and msg.text.startswith("/activate_"))
+async def activate_user(message: types.Message):
+    user_id = int(message.text.split("_")[1])
+    await db.activate_subscription(user_id)
+    await message.answer(f"✅ Подписка активирована для {user_id}")
+    await bot.send_message(user_id, "🎉 *ПОДПИСКА АКТИВИРОВАНА!* Спасибо!", parse_mode="Markdown")
+
+@dp.message_handler(lambda msg: msg.text == "📜 Оферта")
+async def show_offer(message: types.Message):
+    await message.answer(OFFER_TEXT, parse_mode="Markdown")
+
+@dp.message_handler(Command("privacy"))
+async def show_privacy(message: types.Message):
+    await message.answer(PRIVACY_TEXT, parse_mode="Markdown")
+
+@dp.message_handler(Command("deletedata"))
+async def delete_data(message: types.Message):
+    await db.delete_session(message.from_user.id)
+    await db.delete_consent(message.from_user.id)
+    await message.answer("🗑 *Все ваши данные удалены*", parse_mode="Markdown")
+
+@dp.message_handler(Command("exportdata"))
+async def export_data(message: types.Message):
+    session = await db.get_session(message.from_user.id)
+    export = {
+        "user_id": message.from_user.id,
+        "username": message.from_user.username,
+        "has_session": session is not None,
+        "marketplace": session.get('marketplace') if session else None,
+        "export_date": datetime.now().isoformat()
+    }
+    await message.answer(f"📄 *ЭКСПОРТ ДАННЫХ*\n\n```json\n{json.dumps(export, indent=2, ensure_ascii=False)}\n```", parse_mode="Markdown")
+
+@dp.message_handler(lambda msg: msg.text == "❌ Выйти")
+async def logout(message: types.Message):
+    await db.delete_session(message.from_user.id)
+    await message.answer("✅ Вы вышли из аккаунта")
+
+@dp.message_handler(lambda msg: msg.text == "ℹ️ Помощь")
+async def help_command(message: types.Message):
+    await message.answer("""
+ℹ️ *ПОМОЩЬ*
+
+🔐 *Авторизация* — вход через номер телефона
+🎯 *Автобронирование* — создание заявки на поиск слотов
+📋 *Мои заявки* — просмотр активных заявок
+🚚 *Переместить товары* — перенос товаров между складами
+💳 *Оплатить* — продление подписки
+
+📜 *Документы:* /offer, /privacy
+    """, parse_mode="Markdown")
+
+# ========== ФОНОВЫЙ МОНИТОРИНГ ==========
+async def monitor_loop():
+    while True:
+        try:
+            bookings = await db.get_all_active_bookings()
+            for booking in bookings:
+                session = await db.get_session(booking['user_id'])
+                if not session:
+                    continue
+                for warehouse in booking['warehouses']:
+                    if booking['marketplace'] == 'wb':
+                        slots = await wb_get_available_slots(session['cookies'], warehouse)
+                        if slots:
+                            for slot in slots:
+                                if slot.get('coefficient', 0) <= booking['max_coefficient'] and slot.get('date', '') in booking['dates']:
+                                    success, _ = await wb_book_slot(session['cookies'], booking['supply_id'], slot.get('id'))
+                                    if success:
+                                        await bot.send_message(booking['user_id'], f"🎉 *СЛОТ ЗАБРОНИРОВАН!*\n📅 {slot.get('date')}\n📊 Коэфф: {slot.get('coefficient')}\n🏢 {warehouse}", parse_mode="Markdown")
+                                        await db.update_booking_status(booking['id'], 'completed', {'slot_date': slot.get('date'), 'warehouse': warehouse})
+                                        break
+            await asyncio.sleep(30)
+        except Exception as e:
+            logger.error(f"Monitor error: {e}")
+            await asyncio.sleep(60)
+
+# ========== ЗАПУСК ==========
+async def main():
+    await db.init()
+    asyncio.create_task(monitor_loop())
+    print("=" * 50)
+    print("🤖 МАРКЕТПЛЕЙС БОТ (WB + OZON)")
+    print("=" * 50)
+    print("✅ Бот запущен!")
+    print("=" * 50)
+
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True)
