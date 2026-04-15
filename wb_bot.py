@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Telegram бот для продавцов Wildberries и Ozon
-Версия: 4.0 (полная поддержка двух маркетплейсов)
-"""
-
 import asyncio
 import json
 import os
@@ -13,43 +8,34 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton
-)
+from aiogram import Bot, types
+from aiogram.dispatcher import Dispatcher
+from aiogram.dispatcher.filters import Command
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils import executor
 
-# ========== ПРОКСИ ДЛЯ ОБХОДА БЛОКИРОВОК ==========
-PROXY = "http://45.155.205.233:3128"
 import aiohttp
 import aiosqlite
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = "8548006539:AAEtYMMhyzPaXmkfZqxKYxUk3dNzJU3hlo4"
+TOKEN = "8548006539:AAGaSagw-VRIwRPbdbepS6g2I02at22_e7g"
 ADMIN_ID = 7976323654
 PHONE_NUMBER = "+7 923 424 10 37"
 PRICE = 190
 
-# Настройка логирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(bot, storage=storage)
 
 if not os.path.exists('data'):
     os.makedirs('data')
 
 # ========== ЮРИДИЧЕСКИЕ ТЕКСТЫ ==========
-
 OFFER_TEXT = """
 📄 *ПУБЛИЧНАЯ ОФЕРТА*
 
@@ -101,14 +87,11 @@ PRIVACY_TEXT = """
 """
 
 # ========== FSM СОСТОЯНИЯ ==========
-
 class AuthStates(StatesGroup):
-    waiting_for_marketplace = State()
     waiting_for_phone = State()
     waiting_for_sms = State()
 
 class BookingStates(StatesGroup):
-    waiting_for_marketplace = State()
     waiting_for_draft = State()
     waiting_for_warehouses = State()
     waiting_for_coefficient = State()
@@ -116,66 +99,26 @@ class BookingStates(StatesGroup):
     waiting_for_shift = State()
 
 class TransferStates(StatesGroup):
-    waiting_for_marketplace = State()
     waiting_for_sku = State()
     waiting_for_quantity = State()
     waiting_for_warehouse = State()
 
 # ========== БАЗА ДАННЫХ ==========
-
 class Database:
     def __init__(self, db_path: str = "data/bot.db"):
         self.db_path = db_path
     
     async def init(self):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    cookies TEXT,
-                    marketplace TEXT,
-                    phone TEXT,
-                    created_at TIMESTAMP
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS bookings (
-                    id TEXT PRIMARY KEY,
-                    user_id INTEGER,
-                    marketplace TEXT,
-                    supply_id TEXT,
-                    warehouses TEXT,
-                    max_coefficient REAL,
-                    dates TEXT,
-                    shift_days INTEGER,
-                    status TEXT,
-                    result TEXT,
-                    created_at TIMESTAMP
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS subscriptions (
-                    user_id INTEGER PRIMARY KEY,
-                    active INTEGER,
-                    expires_at TIMESTAMP,
-                    activated_at TIMESTAMP
-                )
-            """)
-            await db.execute("""
-                CREATE TABLE IF NOT EXISTS consents (
-                    user_id INTEGER PRIMARY KEY,
-                    agreed INTEGER,
-                    agreed_at TIMESTAMP
-                )
-            """)
+            await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, cookies TEXT, marketplace TEXT, phone TEXT, created_at TIMESTAMP)")
+            await db.execute("CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY, user_id INTEGER, marketplace TEXT, supply_id TEXT, warehouses TEXT, max_coefficient REAL, dates TEXT, shift_days INTEGER, status TEXT, result TEXT, created_at TIMESTAMP)")
+            await db.execute("CREATE TABLE IF NOT EXISTS subscriptions (user_id INTEGER PRIMARY KEY, active INTEGER, expires_at TIMESTAMP, activated_at TIMESTAMP)")
+            await db.execute("CREATE TABLE IF NOT EXISTS consents (user_id INTEGER PRIMARY KEY, agreed INTEGER, agreed_at TIMESTAMP)")
             await db.commit()
     
     async def save_session(self, user_id: int, cookies: Dict, marketplace: str, phone: str):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO users (user_id, cookies, marketplace, phone, created_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (user_id, json.dumps(cookies), marketplace, phone, datetime.now().isoformat()))
+            await db.execute("INSERT OR REPLACE INTO users VALUES (?, ?, ?, ?, ?)", (user_id, json.dumps(cookies), marketplace, phone, datetime.now().isoformat()))
             await db.commit()
     
     async def get_session(self, user_id: int) -> Optional[Dict]:
@@ -195,12 +138,7 @@ class Database:
     async def save_booking(self, user_id: int, marketplace: str, data: Dict) -> str:
         booking_id = f"{marketplace}_{user_id}_{int(datetime.now().timestamp())}"
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT INTO bookings (id, user_id, marketplace, supply_id, warehouses, max_coefficient, dates, shift_days, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (booking_id, user_id, marketplace, data.get('supply_id', ''), 
-                  json.dumps(data.get('warehouses', [])), data.get('max_coefficient', 2.0),
-                  json.dumps(data.get('dates', [])), data.get('shift_days', 0), 'active', datetime.now().isoformat()))
+            await db.execute("INSERT INTO bookings VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (booking_id, user_id, marketplace, data.get('supply_id', ''), json.dumps(data.get('warehouses', [])), data.get('max_coefficient', 2.0), json.dumps(data.get('dates', [])), data.get('shift_days', 0), 'active', datetime.now().isoformat()))
             await db.commit()
         return booking_id
     
@@ -210,12 +148,7 @@ class Database:
             rows = await cur.fetchall()
         result = []
         for row in rows:
-            result.append({
-                'id': row[0], 'marketplace': row[1], 'supply_id': row[2],
-                'warehouses': json.loads(row[3]) if row[3] else [],
-                'max_coefficient': row[4], 'dates': json.loads(row[5]) if row[5] else [],
-                'shift_days': row[6], 'status': row[7], 'result': json.loads(row[8]) if row[8] else None
-            })
+            result.append({'id': row[0], 'marketplace': row[1], 'supply_id': row[2], 'warehouses': json.loads(row[3]) if row[3] else [], 'max_coefficient': row[4], 'dates': json.loads(row[5]) if row[5] else [], 'shift_days': row[6], 'status': row[7], 'result': json.loads(row[8]) if row[8] else None})
         return result
     
     async def get_all_active_bookings(self) -> List[Dict]:
@@ -224,23 +157,17 @@ class Database:
             rows = await cur.fetchall()
         result = []
         for row in rows:
-            result.append({
-                'id': row[0], 'user_id': row[1], 'marketplace': row[2],
-                'supply_id': row[3], 'warehouses': json.loads(row[4]) if row[4] else [],
-                'max_coefficient': row[5], 'dates': json.loads(row[6]) if row[6] else []
-            })
+            result.append({'id': row[0], 'user_id': row[1], 'marketplace': row[2], 'supply_id': row[3], 'warehouses': json.loads(row[4]) if row[4] else [], 'max_coefficient': row[5], 'dates': json.loads(row[6]) if row[6] else []})
         return result
     
     async def update_booking_status(self, booking_id: str, status: str, result: Dict = None):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("UPDATE bookings SET status=?, result=? WHERE id=?", 
-                           (status, json.dumps(result) if result else None, booking_id))
+            await db.execute("UPDATE bookings SET status=?, result=? WHERE id=?", (status, json.dumps(result) if result else None, booking_id))
             await db.commit()
     
     async def save_consent(self, user_id: int):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR REPLACE INTO consents (user_id, agreed, agreed_at) VALUES (?, 1, ?)",
-                           (user_id, datetime.now().isoformat()))
+            await db.execute("INSERT OR REPLACE INTO consents VALUES (?, 1, ?)", (user_id, datetime.now().isoformat()))
             await db.commit()
     
     async def has_consent(self, user_id: int) -> bool:
@@ -256,10 +183,7 @@ class Database:
     
     async def activate_subscription(self, user_id: int, days: int = 30):
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO subscriptions (user_id, active, expires_at, activated_at)
-                VALUES (?, 1, ?, ?)
-            """, (user_id, (datetime.now() + timedelta(days=days)).isoformat(), datetime.now().isoformat()))
+            await db.execute("INSERT OR REPLACE INTO subscriptions VALUES (?, 1, ?, ?)", (user_id, (datetime.now() + timedelta(days=days)).isoformat(), datetime.now().isoformat()))
             await db.commit()
     
     async def is_subscription_active(self, user_id: int) -> bool:
@@ -273,24 +197,18 @@ class Database:
 db = Database()
 
 # ========== HTTP КЛИЕНТ ==========
-
 class HTTPClient:
     def __init__(self):
         self._session = None
     
     async def _get_session(self) -> aiohttp.ClientSession:
-    if self._session is None or self._session.closed:
-        connector = aiohttp.TCPConnector(ssl=False)
-        self._session = aiohttp.ClientSession(connector=connector)
-    return self._session
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(ssl=False)
+            self._session = aiohttp.ClientSession(connector=connector)
+        return self._session
     
     async def request(self, method: str, url: str, cookies: Dict = None, json_data: Dict = None, params: Dict = None) -> Tuple[Optional[Dict], Optional[str]]:
-        headers = headers = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-    'Content-Type': 'application/json'
-}AppleWebKit/537.36', 'Accept': 'application/json', 'Content-Type': 'application/json'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36', 'Accept': 'application/json', 'Content-Type': 'application/json'}
         try:
             session = await self._get_session()
             async with session.request(method=method, url=url, cookies=cookies or {}, json=json_data, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
@@ -305,8 +223,7 @@ class HTTPClient:
 
 http = HTTPClient()
 
-# ========== ФУНКЦИИ ДЛЯ WB ==========
-
+# ========== ФУНКЦИИ WB ==========
 async def wb_request_sms(phone: str) -> Tuple[bool, str, Dict]:
     phone = re.sub(r'[^0-9]', '', phone)
     if phone.startswith('8'):
@@ -352,7 +269,6 @@ async def wb_get_warehouses(cookies: Dict) -> Optional[List[Dict]]:
     return result
 
 async def wb_transfer_stock(cookies: Dict, sku: str, warehouse_id: int, quantity: int) -> Tuple[bool, str]:
-    """Перемещает товары на склад WB"""
     url = "https://suppliers-api.wildberries.ru/api/v3/stocks"
     data = [{"sku": sku, "warehouseId": warehouse_id, "quantity": quantity}]
     result, error = await http.request('PUT', url, cookies=cookies, json_data=data)
@@ -360,8 +276,7 @@ async def wb_transfer_stock(cookies: Dict, sku: str, warehouse_id: int, quantity
         return True, "Перемещение выполнено успешно!"
     return False, error or "Ошибка перемещения"
 
-# ========== ФУНКЦИИ ДЛЯ OZON ==========
-
+# ========== ФУНКЦИИ OZON ==========
 async def ozon_request_sms(phone: str) -> Tuple[bool, str, Dict]:
     phone = re.sub(r'[^0-9]', '', phone)
     result, error = await http.request('POST', 'https://www.ozon.ru/api/composer-api.bx/_action/authSendCode', json_data={"phone": phone})
@@ -384,7 +299,6 @@ async def ozon_get_warehouses(cookies: Dict) -> Optional[List[Dict]]:
     return None
 
 # ========== КЛАВИАТУРЫ ==========
-
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🟣 WB Авторизация"), KeyboardButton(text="🟢 Ozon Авторизация")],
@@ -403,51 +317,41 @@ marketplace_kb = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 # ========== ОБРАБОТЧИКИ ==========
-
-@dp.message(Command("start"))
+@dp.message_handler(Command("start"))
 async def start(message: types.Message):
     if not await db.has_consent(message.from_user.id):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✅ Принимаю", callback_data="accept_terms")],
             [InlineKeyboardButton(text="❌ Не принимаю", callback_data="decline_terms")]
         ])
-        await message.answer(
-            "🔐 *ПЕРЕД НАЧАЛОМ РАБОТЫ*\n\n"
-            "Ознакомьтесь с:\n• /offer — Публичная оферта\n• /privacy — Политика конфиденциальности\n\n"
-            "Вы принимаете условия?",
-            parse_mode="Markdown", reply_markup=kb
-        )
+        await message.answer("🔐 *ПЕРЕД НАЧАЛОМ РАБОТЫ*\n\nОзнакомьтесь с:\n• /offer — Публичная оферта\n• /privacy — Политика конфиденциальности\n\nВы принимаете условия?", parse_mode="Markdown", reply_markup=kb)
         return
-    await message.answer(
-        "🤖 *МАРКЕТПЛЕЙС БОТ (WB + OZON)*\n\n"
-        "Выберите маркетплейс для авторизации:",
-        parse_mode="Markdown", reply_markup=main_keyboard
-    )
+    await message.answer("🤖 *МАРКЕТПЛЕЙС БОТ (WB + OZON)*\n\nВыберите маркетплейс для авторизации:", parse_mode="Markdown", reply_markup=main_keyboard)
 
-@dp.callback_query(lambda c: c.data == "accept_terms")
+@dp.callback_query_handler(lambda c: c.data == "accept_terms")
 async def accept_terms(callback: types.CallbackQuery):
     await db.save_consent(callback.from_user.id)
     await callback.message.edit_text("✅ Спасибо! Теперь вы можете использовать бота. Нажмите /start")
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "decline_terms")
+@dp.callback_query_handler(lambda c: c.data == "decline_terms")
 async def decline_terms(callback: types.CallbackQuery):
     await callback.message.edit_text("❌ Без согласия с условиями использование бота невозможно.")
     await callback.answer()
 
-@dp.message(lambda msg: msg.text == "🟣 WB Авторизация")
+@dp.message_handler(lambda msg: msg.text == "🟣 WB Авторизация")
 async def auth_wb(message: types.Message, state: FSMContext):
     await state.update_data(marketplace='wb')
     await message.answer("🔐 *Введите номер телефона от кабинета WB:*\nФорматы: +7XXXXXXXXXX, 8XXXXXXXXXX", parse_mode="Markdown")
-    await state.set_state(AuthStates.waiting_for_phone)
+    await AuthStates.waiting_for_phone.set()
 
-@dp.message(lambda msg: msg.text == "🟢 Ozon Авторизация")
+@dp.message_handler(lambda msg: msg.text == "🟢 Ozon Авторизация")
 async def auth_ozon(message: types.Message, state: FSMContext):
     await state.update_data(marketplace='ozon')
     await message.answer("🔐 *Введите номер телефона от кабинета Ozon:*", parse_mode="Markdown")
-    await state.set_state(AuthStates.waiting_for_phone)
+    await AuthStates.waiting_for_phone.set()
 
-@dp.message(AuthStates.waiting_for_phone)
+@dp.message_handler(state=AuthStates.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     data = await state.get_data()
     marketplace = data.get('marketplace')
@@ -461,11 +365,11 @@ async def process_phone(message: types.Message, state: FSMContext):
     if success:
         await state.update_data(phone=auth_data.get('phone'))
         await message.answer(f"✅ {msg}\n\nВведите СМС-код:")
-        await state.set_state(AuthStates.waiting_for_sms)
+        await AuthStates.waiting_for_sms.set()
     else:
         await message.answer(f"❌ {msg}\nПопробуйте снова.")
 
-@dp.message(AuthStates.waiting_for_sms)
+@dp.message_handler(state=AuthStates.waiting_for_sms)
 async def process_sms(message: types.Message, state: FSMContext):
     data = await state.get_data()
     marketplace = data.get('marketplace')
@@ -480,25 +384,24 @@ async def process_sms(message: types.Message, state: FSMContext):
     if success:
         await db.save_session(message.from_user.id, auth_data['cookies'], marketplace, phone)
         await message.answer(f"✅ {msg}\n\nТеперь вы можете создавать заявки на автобронирование!", parse_mode="Markdown")
-        await state.clear()
+        await state.finish()
     else:
         await message.answer(f"❌ {msg}\nПопробуйте снова.")
 
-@dp.message(lambda msg: msg.text == "🎯 Автобронирование")
+@dp.message_handler(lambda msg: msg.text == "🎯 Автобронирование")
 async def create_booking(message: types.Message, state: FSMContext):
     session = await db.get_session(message.from_user.id)
     if not session:
         await message.answer("⚠️ Сначала авторизуйтесь!")
         return
-    
     await message.answer("Выберите маркетплейс:", reply_markup=marketplace_kb)
-    await state.set_state(BookingStates.waiting_for_marketplace)
+    await BookingStates.waiting_for_marketplace.set()
 
-@dp.callback_query(lambda c: c.data.startswith("mp_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("mp_"), state=BookingStates.waiting_for_marketplace)
 async def select_marketplace(callback: types.CallbackQuery, state: FSMContext):
     if callback.data == "mp_cancel":
         await callback.message.edit_text("❌ Отменено")
-        await state.clear()
+        await state.finish()
         await callback.answer()
         return
     
@@ -531,10 +434,10 @@ async def select_marketplace(callback: types.CallbackQuery, state: FSMContext):
         kb.inline_keyboard.append([InlineKeyboardButton(text=f"📄 {supply.get('name', 'Без названия')[:40]}", callback_data=f"draft_{supply.get('id')}")])
     
     await callback.message.edit_text("📄 Выберите черновик поставки:", reply_markup=kb)
-    await state.set_state(BookingStates.waiting_for_draft)
+    await BookingStates.waiting_for_draft.set()
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith("draft_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("draft_"), state=BookingStates.waiting_for_draft)
 async def select_draft(callback: types.CallbackQuery, state: FSMContext):
     supply_id = callback.data.split("_")[1]
     data = await state.get_data()
@@ -548,10 +451,10 @@ async def select_draft(callback: types.CallbackQuery, state: FSMContext):
     
     await state.update_data(supply_id=supply_id, supply_name=selected.get('name'))
     await callback.message.edit_text("🏢 Введите склады через запятую (до 5):\nПример: `Электросталь, Коледино, Подольск`", parse_mode="Markdown")
-    await state.set_state(BookingStates.waiting_for_warehouses)
+    await BookingStates.waiting_for_warehouses.set()
     await callback.answer()
 
-@dp.message(BookingStates.waiting_for_warehouses)
+@dp.message_handler(state=BookingStates.waiting_for_warehouses)
 async def set_warehouses(message: types.Message, state: FSMContext):
     warehouses = [w.strip() for w in message.text.split(',')]
     if len(warehouses) > 5:
@@ -559,9 +462,9 @@ async def set_warehouses(message: types.Message, state: FSMContext):
         return
     await state.update_data(warehouses=warehouses)
     await message.answer("📊 Введите максимальный коэффициент (например: `1.5`, `2.0`):\n💡 Если не уверены — `2.0`", parse_mode="Markdown")
-    await state.set_state(BookingStates.waiting_for_coefficient)
+    await BookingStates.waiting_for_coefficient.set()
 
-@dp.message(BookingStates.waiting_for_coefficient)
+@dp.message_handler(state=BookingStates.waiting_for_coefficient)
 async def set_coefficient(message: types.Message, state: FSMContext):
     try:
         coef = float(message.text.replace(',', '.'))
@@ -572,9 +475,9 @@ async def set_coefficient(message: types.Message, state: FSMContext):
         await message.answer("❌ Введите число от 0.1 до 10")
         return
     await message.answer("📅 Введите даты (ГГГГ-ММ-ДД):\nПример: `2025-10-15, 2025-10-20`", parse_mode="Markdown")
-    await state.set_state(BookingStates.waiting_for_dates)
+    await BookingStates.waiting_for_dates.set()
 
-@dp.message(BookingStates.waiting_for_dates)
+@dp.message_handler(state=BookingStates.waiting_for_dates)
 async def set_dates(message: types.Message, state: FSMContext):
     dates = [d.strip() for d in re.split(r'[ ,]+', message.text) if re.match(r'^\d{4}-\d{2}-\d{2}$', d.strip())]
     if not dates:
@@ -582,9 +485,9 @@ async def set_dates(message: types.Message, state: FSMContext):
         return
     await state.update_data(dates=dates)
     await message.answer("⏱ Введите сдвиг поиска (дни):\n0 — искать с сегодня\n3 — минимум на 3 дня вперёд\n\nЕсли не уверены — `0`", parse_mode="Markdown")
-    await state.set_state(BookingStates.waiting_for_shift)
+    await BookingStates.waiting_for_shift.set()
 
-@dp.message(BookingStates.waiting_for_shift)
+@dp.message_handler(state=BookingStates.waiting_for_shift)
 async def set_shift(message: types.Message, state: FSMContext):
     try:
         shift = int(message.text)
@@ -606,19 +509,12 @@ async def set_shift(message: types.Message, state: FSMContext):
     booking_id = await db.save_booking(message.from_user.id, data.get('marketplace'), booking_data)
     
     await message.answer(
-        f"✅ *ЗАЯВКА СОЗДАНА!*\n\n"
-        f"🆔 ID: `{booking_id}`\n"
-        f"📄 Поставка: {data.get('supply_name', 'Неизвестно')}\n"
-        f"🏢 Склады: {', '.join(data.get('warehouses', []))}\n"
-        f"📊 Коэфф: ≤ {data.get('max_coefficient')}\n"
-        f"📅 Даты: {', '.join(data.get('dates', []))}\n"
-        f"⏱ Сдвиг: {shift} дней\n\n"
-        f"🔍 Бот начал мониторинг!",
+        f"✅ *ЗАЯВКА СОЗДАНА!*\n\n🆔 ID: `{booking_id}`\n📄 Поставка: {data.get('supply_name', 'Неизвестно')}\n🏢 Склады: {', '.join(data.get('warehouses', []))}\n📊 Коэфф: ≤ {data.get('max_coefficient')}\n📅 Даты: {', '.join(data.get('dates', []))}\n⏱ Сдвиг: {shift} дней\n\n🔍 Бот начал мониторинг!",
         parse_mode="Markdown"
     )
-    await state.clear()
+    await state.finish()
 
-@dp.message(lambda msg: msg.text == "📋 Мои заявки")
+@dp.message_handler(lambda msg: msg.text == "📋 Мои заявки")
 async def show_bookings(message: types.Message):
     bookings = await db.get_user_bookings(message.from_user.id)
     if not bookings:
@@ -635,16 +531,16 @@ async def show_bookings(message: types.Message):
         text += "\n"
     await message.answer(text, parse_mode="Markdown")
 
-@dp.message(lambda msg: msg.text == "🚚 Переместить товары")
+@dp.message_handler(lambda msg: msg.text == "🚚 Переместить товары")
 async def transfer_start(message: types.Message, state: FSMContext):
     session = await db.get_session(message.from_user.id)
     if not session:
         await message.answer("⚠️ Сначала авторизуйтесь!")
         return
     await message.answer("Выберите маркетплейс:", reply_markup=marketplace_kb)
-    await state.set_state(TransferStates.waiting_for_marketplace)
+    await TransferStates.waiting_for_marketplace.set()
 
-@dp.callback_query(lambda c: c.data.startswith("transfer_mp_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("transfer_mp_"), state=TransferStates.waiting_for_marketplace)
 async def transfer_marketplace(callback: types.CallbackQuery, state: FSMContext):
     marketplace = callback.data.split("_")[2]
     session = await db.get_session(callback.from_user.id)
@@ -656,16 +552,16 @@ async def transfer_marketplace(callback: types.CallbackQuery, state: FSMContext)
     
     await state.update_data(marketplace=marketplace)
     await callback.message.edit_text("🚚 Введите SKU товара:")
-    await state.set_state(TransferStates.waiting_for_sku)
+    await TransferStates.waiting_for_sku.set()
     await callback.answer()
 
-@dp.message(TransferStates.waiting_for_sku)
+@dp.message_handler(state=TransferStates.waiting_for_sku)
 async def transfer_sku(message: types.Message, state: FSMContext):
     await state.update_data(sku=message.text.strip())
     await message.answer("📦 Введите количество:")
-    await state.set_state(TransferStates.waiting_for_quantity)
+    await TransferStates.waiting_for_quantity.set()
 
-@dp.message(TransferStates.waiting_for_quantity)
+@dp.message_handler(state=TransferStates.waiting_for_quantity)
 async def transfer_quantity(message: types.Message, state: FSMContext):
     try:
         qty = int(message.text)
@@ -686,7 +582,7 @@ async def transfer_quantity(message: types.Message, state: FSMContext):
     
     if not warehouses:
         await message.answer("❌ Не удалось загрузить склады")
-        await state.clear()
+        await state.finish()
         return
     
     kb = InlineKeyboardMarkup(inline_keyboard=[])
@@ -695,9 +591,9 @@ async def transfer_quantity(message: types.Message, state: FSMContext):
     
     await state.update_data(warehouses=warehouses)
     await message.answer("🏢 Выберите склад:", reply_markup=kb)
-    await state.set_state(TransferStates.waiting_for_warehouse)
+    await TransferStates.waiting_for_warehouse.set()
 
-@dp.callback_query(lambda c: c.data.startswith("transfer_wh_"))
+@dp.callback_query_handler(lambda c: c.data.startswith("transfer_wh_"), state=TransferStates.waiting_for_warehouse)
 async def transfer_execute(callback: types.CallbackQuery, state: FSMContext):
     warehouse_id = callback.data.split("_")[2]
     data = await state.get_data()
@@ -715,10 +611,10 @@ async def transfer_execute(callback: types.CallbackQuery, state: FSMContext):
     else:
         await callback.message.edit_text(f"❌ {msg}")
     
-    await state.clear()
+    await state.finish()
     await callback.answer()
 
-@dp.message(lambda msg: msg.text == "💳 Оплатить")
+@dp.message_handler(lambda msg: msg.text == "💳 Оплатить")
 async def payment(message: types.Message):
     if await db.is_subscription_active(message.from_user.id):
         await message.answer("✅ *Подписка активна!*", parse_mode="Markdown")
@@ -738,112 +634,4 @@ async def payment(message: types.Message):
 
 ✅ После оплаты нажмите «Я оплатил»
 """
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="payment_done")],
-        [InlineKeyboardButton(text="❓ Помощь", callback_data="payment_help")]
-    ])
-    await message.answer(text, parse_mode="Markdown", reply_markup=kb)
-
-@dp.callback_query(lambda c: c.data == "payment_done")
-async def payment_done(callback: types.CallbackQuery):
-    await callback.message.edit_text("🔍 Запрос отправлен администратору. Ожидайте подтверждения...")
-    await bot.send_message(ADMIN_ID, f"💰 ОПЛАТА\nПользователь: @{callback.from_user.username}\nID: {callback.from_user.id}\nСумма: {PRICE} ₽\n/activate_{callback.from_user.id} — активировать")
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data == "payment_help")
-async def payment_help(callback: types.CallbackQuery):
-    await callback.message.edit_text("❓ Если оплата не проходит, напишите администратору @support")
-    await callback.answer()
-
-@dp.message(lambda msg: str(msg.from_user.id) == str(ADMIN_ID) and msg.text.startswith("/activate_"))
-async def activate_user(message: types.Message):
-    user_id = int(message.text.split("_")[1])
-    await db.activate_subscription(user_id)
-    await message.answer(f"✅ Подписка активирована для {user_id}")
-    await bot.send_message(user_id, "🎉 *ПОДПИСКА АКТИВИРОВАНА!* Спасибо!", parse_mode="Markdown")
-
-@dp.message(lambda msg: msg.text == "📜 Оферта")
-async def show_offer(message: types.Message):
-    await message.answer(OFFER_TEXT, parse_mode="Markdown")
-
-@dp.message(Command("privacy"))
-async def show_privacy(message: types.Message):
-    await message.answer(PRIVACY_TEXT, parse_mode="Markdown")
-
-@dp.message(Command("deletedata"))
-async def delete_data(message: types.Message):
-    await db.delete_session(message.from_user.id)
-    await db.delete_consent(message.from_user.id)
-    await message.answer("🗑 *Все ваши данные удалены*", parse_mode="Markdown")
-
-@dp.message(Command("exportdata"))
-async def export_data(message: types.Message):
-    session = await db.get_session(message.from_user.id)
-    export = {
-        "user_id": message.from_user.id,
-        "username": message.from_user.username,
-        "has_session": session is not None,
-        "marketplace": session.get('marketplace') if session else None,
-        "export_date": datetime.now().isoformat()
-    }
-    await message.answer(f"📄 *ЭКСПОРТ ДАННЫХ*\n\n```json\n{json.dumps(export, indent=2, ensure_ascii=False)}\n```", parse_mode="Markdown")
-
-@dp.message(lambda msg: msg.text == "❌ Выйти")
-async def logout(message: types.Message):
-    await db.delete_session(message.from_user.id)
-    await message.answer("✅ Вы вышли из аккаунта")
-
-@dp.message(lambda msg: msg.text == "ℹ️ Помощь")
-async def help_command(message: types.Message):
-    await message.answer("""
-ℹ️ *ПОМОЩЬ*
-
-🔐 *Авторизация* — вход через номер телефона
-🎯 *Автобронирование* — создание заявки на поиск слотов
-📋 *Мои заявки* — просмотр активных заявок
-🚚 *Переместить товары* — перенос товаров между складами
-💳 *Оплатить* — продление подписки
-
-📜 *Документы:* /offer, /privacy
-    """, parse_mode="Markdown")
-
-# ========== ФОНОВЫЙ МОНИТОРИНГ ==========
-
-async def monitor_loop():
-    while True:
-        try:
-            bookings = await db.get_all_active_bookings()
-            for booking in bookings:
-                session = await db.get_session(booking['user_id'])
-                if not session:
-                    continue
-                for warehouse in booking['warehouses']:
-                    if booking['marketplace'] == 'wb':
-                        slots = await wb_get_available_slots(session['cookies'], warehouse)
-                        if slots:
-                            for slot in slots:
-                                if slot.get('coefficient', 0) <= booking['max_coefficient'] and slot.get('date', '') in booking['dates']:
-                                    success, _ = await wb_book_slot(session['cookies'], booking['supply_id'], slot.get('id'))
-                                    if success:
-                                        await bot.send_message(booking['user_id'], f"🎉 *СЛОТ ЗАБРОНИРОВАН!*\n📅 {slot.get('date')}\n📊 Коэфф: {slot.get('coefficient')}\n🏢 {warehouse}", parse_mode="Markdown")
-                                        await db.update_booking_status(booking['id'], 'completed', {'slot_date': slot.get('date'), 'warehouse': warehouse})
-                                        break
-            await asyncio.sleep(30)
-        except Exception as e:
-            logger.error(f"Monitor error: {e}")
-            await asyncio.sleep(60)
-
-# ========== ЗАПУСК ==========
-
-async def main():
-    await db.init()
-    asyncio.create_task(monitor_loop())
-    print("=" * 50)
-    print("🤖 МАРКЕТПЛЕЙС БОТ (WB + OZON)")
-    print("=" * 50)
-    print("✅ Бот запущен!")
-    print("=" * 50)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+    kb = In
