@@ -8,11 +8,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from aiogram import Bot, types
+from aiogram import Bot, Dispatcher, types
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import Dispatcher
 from aiogram.dispatcher.filters import Command
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import executor
 
@@ -20,9 +20,9 @@ import aiohttp
 import aiosqlite
 
 # ========== НАСТРОЙКИ ==========
-TOKEN = "8548006539:AAGaSagw-VRIwRPbdbepS6g2I02at22_e7g"
-ADMIN_ID = 7976323654
-PHONE_NUMBER = "+7 923 424 10 37"
+TOKEN = "8548006539:AAGaSagw-VRIwRPbdbepS6g2I02at22_e7g"  # ТВОЙ ТОКЕН
+ADMIN_ID = 7976323654  # ТВОЙ ID
+PHONE_NUMBER = "+7 923 424 10 37"  # ТВОЙ НОМЕР
 PRICE = 190
 
 logging.basicConfig(level=logging.INFO)
